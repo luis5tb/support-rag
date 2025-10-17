@@ -4,7 +4,7 @@ from gradio import ChatMessage
 import aiohttp
 import ssl
 from llama_index.core.tools import FunctionTool
-from llama_index.core.agent import AgentRunner, ReActAgentWorker
+from llama_index.core.agent import AgentWorkflow, ReActAgent
 from llama_index.llms.openai_like import OpenAILike
 from llama_index.core.llms import ChatMessage as LlamaIndexChatMessage
 import httpx
@@ -45,14 +45,14 @@ class GradioAgent():
         support_ticket_tool = FunctionTool.from_defaults(fn=self.search_support_tickets)
         update_state_tool = FunctionTool.from_defaults(fn=self.update_ticket_state)
 
-        agent_worker = ReActAgentWorker(
+        agent_worker = ReActAgent(
             tools=[support_ticket_tool, update_state_tool],
             llm=llm,
             verbose=True, # Set to True to see the agent's thought process
             max_iterations=100 
         )
-        self.agent = AgentRunner(
-            agent_worker=agent_worker,
+        self.agent = AgentWorkflow(
+            agents=[agent_worker],
             verbose=True, # Set to True to see the agent's thought process
         )
 
