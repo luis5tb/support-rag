@@ -3,11 +3,14 @@ import gradio as gr
 from gradio import ChatMessage
 import aiohttp
 import ssl
-from llama_index.core.tools import FunctionTool
-from llama_index.core.agent import AgentWorkflow, ReActAgent
-from llama_index.llms.openai_like import OpenAILike
-from llama_index.core.llms import ChatMessage as LlamaIndexChatMessage
+from google.adk.agents import Agent
 import httpx
+import os
+from typing import List
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if it exists
+load_dotenv()
 
 
 class GradioAgent():
@@ -16,8 +19,6 @@ class GradioAgent():
         self.agent_port = agent_port
         if not url_is_valid(rag_api_endpoint):
             raise InvalidAPIEndpointError("Invalid RAG API endpoint URL")
-        if not url_is_valid(llm_api_endpoint):
-            raise InvalidAPIEndpointError("Invalid LLM API endpoint URL")
         self.rag_api_endpoint = rag_api_endpoint
         self.llm_api_endpoint = llm_api_endpoint
         self.model_api_key = model_api_key
@@ -28,36 +29,19 @@ class GradioAgent():
         self.num_sources = 1
         self.only_high_similarity_nodes = False
 
-        if self.skip_tls:
-            self.logger.info("Skipping TLS verification.")
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            client = httpx.Client(verify=ssl_context)
-            aclient = httpx.AsyncClient(verify=ssl_context)
-            # is_chat_model is needed for the chatbot to work, otherwise it does completion instead of chat
-            llm = OpenAILike(model=self.model, api_base=self.llm_api_endpoint, context_window=self.context_window_length, api_key=self.model_api_key, http_client=client, async_http_client=aclient, is_chat_model=True)
-        else:    
-            # is_chat_model is needed for the chatbot to work, otherwise it does completion instead of chat
-            llm = OpenAILike(model=self.model, api_base=self.llm_api_endpoint, context_window=self.context_window_length, api_key=self.model_api_key, is_chat_model=True)
+        # Configure API keys based on the endpoint being used
+        # If using custom endpoint (Ollama), use OPENAI_API_KEY and OPENAI_API_BASE
+        # If using Gemini, use GEMINI_API_KEY
+        if llm_api_endpoint and "ollama" in llm_api_endpoint.lower() or llm_api_endpoint and llm_api_endpoint != "https://generativelanguage.googleapis.com":
+            # Using Ollama or other OpenAI-compatible endpoint
+            os.environ["OPENAI_API_KEY"] = self.model_api_key
+            os.environ["OPENAI_API_BASE"] = self.llm_api_endpoint
+            self.logger.info(f"Configured agent to use OpenAI-compatible endpoint: {self.llm_api_endpoint} with model: {self.model}")
+        else:
+            # Using Google Gemini
+            os.environ["GEMINI_API_KEY"] = self.model_api_key
+            self.logger.info(f"Configured agent to use Gemini model: {self.model}")
 
-
-        support_ticket_tool = FunctionTool.from_defaults(fn=self.search_support_tickets)
-        update_state_tool = FunctionTool.from_defaults(fn=self.update_ticket_state)
-
-        agent_worker = ReActAgent(
-            tools=[support_ticket_tool, update_state_tool],
-            llm=llm,
-            verbose=True, # Set to True to see the agent's thought process
-            max_iterations=100 
-        )
-        self.agent = AgentWorkflow(
-            agents=[agent_worker],
-            verbose=True, # Set to True to see the agent's thought process
-        )
-
-
-        self.chat_history: List[LlamaIndexChatMessage] = []
         self.system_prompt = """You are a helpful support ticket assistant. Your goal is to collect specific pieces of information from the user to create a complete support case query.
 
 On the first turn, you must use the `update_ticket_state` tool to store the original user message in the `user_description` field. Store the original user message as is, without any modifications.
@@ -77,70 +61,72 @@ When updating product_version, the version MUST be a valid version string, for e
 **CRITICAL: When the `search_support_tickets` tool returns search results (not asking for more information), you MUST respond with ONLY those results. Do NOT use any other tools after receiving search results. The search results are the final answer to the user's question.**
 
 Remember to be conversational and helpful throughout the interaction."""
-        
-        # Initialize chat history with the system prompt
-        self.chat_history = [
-            LlamaIndexChatMessage(role="system", content=self.system_prompt)
-        ]
+
+        # Create ADK agent with tools using simple Agent class
+        self.agent = Agent(
+            name="support_ticket_assistant",
+            model=self.model,
+            instruction=self.system_prompt,
+            description="An assistant that helps users create support ticket queries by gathering required information.",
+            tools=[self.search_support_tickets, self.update_ticket_state]
+        )
+
+        # Initialize conversation history for Gradio
+        self.conversation_history = []
 
     async def respond(self, message: str, history: List[List[str]]) -> tuple[List[List[str]], str]:
         """
         Handle user messages and generate responses using the agent.
-        
+
         Args:
             message (str): The user's message
             history (List[List[str]]): The chat history in Gradio format
-            
+
         Returns:
             tuple: Updated history and empty string (for new message)
         """
         try:
-            # Get response from agent
-            response = await self.agent.achat(message, chat_history=self.chat_history)
-            
-            # Update our internal chat history
-            self.chat_history.append(LlamaIndexChatMessage(role="user", content=message))
-            self.chat_history.append(LlamaIndexChatMessage(role="assistant", content=str(response)))
-            
+            # Get response from ADK agent
+            response = await self.agent.run_async(message)
+
+            # Extract the response text
+            response_text = str(response)
+
             # Return the updated history (Gradio will handle the display)
-            return history + [[message, str(response)]], ""
-            
+            return history + [[message, response_text]], ""
+
         except Exception as e:
             error_message = f"An error occurred: {e}"
+            self.logger.error(error_message)
             print(error_message)
             return history + [[message, error_message]], ""
-    
+
     async def get_agent_response(self, message: str) -> str:
         """
-        Get response from agent without updating the chat history.
-        
+        Get response from agent.
+
         Args:
             message (str): The user's message
-            
+
         Returns:
             str: The agent's response
         """
         try:
-            # Get response from agent
-            response = await self.agent.achat(message, chat_history=self.chat_history)
-            
-            # Update our internal chat history
-            self.chat_history.append(LlamaIndexChatMessage(role="user", content=message))
-            self.chat_history.append(LlamaIndexChatMessage(role="assistant", content=str(response)))
-            
+            # Get response from ADK agent
+            response = await self.agent.run_async(message)
+
             return str(response)
-            
+
         except Exception as e:
             error_message = f"An error occurred: {e}"
+            self.logger.error(error_message)
             print(error_message)
             return error_message
     
     def clear_chat(self):
         """Clear the chat history and reset the state."""
         self.ticket_state.clear()
-        self.chat_history = [
-            LlamaIndexChatMessage(role="system", content=self.system_prompt)
-        ]
+        self.conversation_history = []
         return [], "", "No information gathered yet"
 
     def update_ticket_state(self, field: str, value: str) -> str:

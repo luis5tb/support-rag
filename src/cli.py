@@ -227,16 +227,18 @@ def main():
     parser_agent.add_argument(
         "-llm-api",
         "--llm-api-endpoint",
-        required=True,
+        required=False,
         type=str,
-        help="The api endpoint to access the llm model."
+        default="https://generativelanguage.googleapis.com",
+        help="The api endpoint to access the llm model. Not needed for Gemini models."
     )
     parser_agent.add_argument(
         "-lk",
         "--llm-api-key",
-        required=True,
+        required=False,
+        default=os.environ.get('GEMINI_API_KEY'),
         type=str,
-        help="The api key to access the llm model. Default value reads OPENAI_API_KEY env var."
+        help="The api key to access the Gemini model. Reads GEMINI_API_KEY env var if not provided."
     )
     # Set function that handles the chatbot action
     parser_agent.set_defaults(func=run_agent)
