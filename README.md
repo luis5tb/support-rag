@@ -28,8 +28,7 @@ The files are expected to have the following naming:
 1. Install requirements:
 
     ~~~sh
-    python -m venv .venv
-    pip install -r requirements.txt
+    uv sync
     ~~~
 
 2. Run data ingestion:
@@ -37,10 +36,10 @@ The files are expected to have the following naming:
     > **NOTE**: By default the ingestion will only ingest data not existing in the Vector DB, if you want to initialize the db from scratch you can add `-i` parameter.
 
     ~~~sh
-    python src/cli.py ingest -d /folder/with/case/files -m <embeddings_model> -e <ollama_endpoint>
+    uv run python src/cli.py ingest -d /folder/with/case/files -m <embeddings_model> -e <ollama_endpoint>
 
     #Example:
-    python src/cli.py ingest -d ./case_files -m nomic-embed-text:latest -e http://127.0.0.1:11434
+    uv run python src/cli.py ingest -d ./case_files -m nomic-embed-text:latest -e http://127.0.0.1:11434
     ~~~
 
 3. Run ChatBot:
@@ -48,7 +47,7 @@ The files are expected to have the following naming:
     > **NOTE**: By default the chatbot WebUI will listen on port 8080, you can change the port by using the `-p` parameter.
 
     ~~~sh
-    python src/cli.py chatbot -m <llm_model> -e <ollama_endpoint>/ -em <embeddings_model>
+    uv run python src/cli.py chatbot -m <llm_model> -e <ollama_endpoint>/ -em <embeddings_model>
     #Example
-    python src/cli.py chatbot -m gemma3:4b -e http://127.0.0.1:11434 -em nomic-embed-text:latest
+    uv run python src/cli.py chatbot -m gemma3:4b -e http://127.0.0.1:11434 -em nomic-embed-text:latest
     ~~~
