@@ -13,8 +13,8 @@ dependencies = [
     "llama-index-embeddings-openai-like==0.2.2",
     "llama-index-retrievers-bm25==0.6.5",
     "llama-index-readers-web==0.5.5",
-    # Google ADK - Used for agent functionality
-    "google-adk>=0.2.0",
+    # Google ADK - Used for agent functionality (with A2A protocol support)
+    "google-adk[a2a]>=0.2.0",
     # UI and utilities
     "gradio==5.49.1",
     "validators==0.35.0",

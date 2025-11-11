@@ -1,10 +1,12 @@
 from utils.utils import *
 from ingestion.ingest import ChromaIngester
 from chatbot.chatbot import GradioChatBot
-from agent.agent import GradioAgent
+from agent.agent import GradioAgent, create_a2a_app
 from ragapi.ragapi import RagApi
 import argparse
 import os
+import uvicorn
+from dotenv import load_dotenv
 
 
 def run_chatbot(args, logger):
@@ -23,6 +25,28 @@ def run_agent(args, logger):
     try:
         agent = GradioAgent(agent_port=args.port, rag_api_endpoint=args.rag_api_endpoint, llm_api_endpoint=args.llm_api_endpoint, model_api_key=args.llm_api_key, model=args.model, context_window_length=args.context_window_length, skip_tls=args.insecure_skip_tls)
         agent.run()
+    except Exception as e:
+        logger.error(f"{e}")
+        return 1
+
+def run_a2a_agent(args, logger):
+    """Function to handle the 'a2a-agent' action."""
+    logger.info(f"Starting A2A agent server on port {args.port}.")
+    try:
+        # Create the A2A app
+        a2a_app = create_a2a_app(
+            rag_api_endpoint=args.rag_api_endpoint,
+            llm_api_endpoint=args.llm_api_endpoint,
+            model_api_key=args.llm_api_key,
+            model=args.model,
+            port=args.port,
+            skip_tls=args.insecure_skip_tls
+        )
+
+        logger.info(f"A2A agent server starting. Agent card will be available at: http://localhost:{args.port}/.well-known/agent-card.json")
+
+        # Run the uvicorn server
+        uvicorn.run(a2a_app, host="0.0.0.0", port=args.port)
     except Exception as e:
         logger.error(f"{e}")
         return 1
@@ -67,7 +91,9 @@ def run_s3_ingest(args, logger):
         return 1
 
 def main():
-    
+    # Load environment variables from .env file if it exists
+    load_dotenv()
+
     # Create logger for the cli
     logger = Logger("support-rag-cli", "INFO").new_logger()
 
@@ -136,14 +162,16 @@ def main():
     parser_rag_api.add_argument(
         "-lk",
         "--llm-api-key",
-        required=True,
+        required=False,
+        default=os.environ.get('GEMINI_API_KEY'),
         type=str,
-        help="The api key to access the llm model. Default value reads OPENAI_API_KEY env var."
+        help="The api key to access the llm model. Default value reads GEMINI_API_KEY env var."
     )
     parser_rag_api.add_argument(
         "-ek",
         "--embedding-api-key",
-        required=True,
+        required=False,
+        default=os.environ.get('OPENAI_EMBEDDING_API_KEY'),
         type=str,
         help="The api key to access the embedding model. Default value reads OPENAI_EMBEDDING_API_KEY env var."
     )   
@@ -240,8 +268,68 @@ def main():
         type=str,
         help="The api key to access the Gemini model. Reads GEMINI_API_KEY env var if not provided."
     )
-    # Set function that handles the chatbot action
+    # Set function that handles the agent action
     parser_agent.set_defaults(func=run_agent)
+
+    # Add a2a-agent parser
+    parser_a2a_agent = subparsers.add_parser("a2a-agent", help="Initiate A2A agent server (Agent-to-Agent protocol).")
+    # Add listen port argument
+    parser_a2a_agent.add_argument(
+        "-p",
+        "--port",
+        type=int,
+        required=False,
+        default=8001,
+        help="The port where the A2A agent server will be exposed."
+    )
+    parser_a2a_agent.add_argument(
+        "--rag-api-endpoint",
+        required=False,
+        default="http://127.0.0.1:8080/answer",
+        type=str,
+        help="The endpoint to access the rag api."
+    )
+    parser_a2a_agent.add_argument(
+        "--insecure-skip-tls",
+        required=False,
+        action='store_true',
+        default=False,
+        help="If set, TLS connections to api endpoints skip cert verification."
+    )
+    parser_a2a_agent.add_argument(
+        "-m",
+        "--model",
+        required=True,
+        type=str,
+        help="The LLM model to be used."
+    )
+    parser_a2a_agent.add_argument(
+        "-w",
+        "--context-window-length",
+        required=False,
+        default=10000,
+        type=str,
+        help="The model's context window length."
+    )
+    parser_a2a_agent.add_argument(
+        "-llm-api",
+        "--llm-api-endpoint",
+        required=False,
+        type=str,
+        default="https://generativelanguage.googleapis.com",
+        help="The api endpoint to access the llm model. Not needed for Gemini models."
+    )
+    parser_a2a_agent.add_argument(
+        "-lk",
+        "--llm-api-key",
+        required=False,
+        default=os.environ.get('GEMINI_API_KEY'),
+        type=str,
+        help="The api key to access the Gemini model. Reads GEMINI_API_KEY env var if not provided."
+    )
+    # Set function that handles the a2a-agent action
+    parser_a2a_agent.set_defaults(func=run_a2a_agent)
+
     # Add local-ingest parser
     parser_local_ingest = subparsers.add_parser("local-ingest", help="Ingest data from a local source.")
     # Add source dir argument
@@ -275,7 +363,8 @@ def main():
     parser_local_ingest.add_argument(
         "-ek",
         "--embedding-api-key",
-        required=True,
+        required=False,
+        default=os.environ.get('OPENAI_EMBEDDING_API_KEY'),
         type=str,
         help="The api key to access the embedding model. Default value reads OPENAI_EMBEDDING_API_KEY env var."
     )   
@@ -317,7 +406,8 @@ def main():
     parser_s3_ingest.add_argument(
         "-ek",
         "--embedding-api-key",
-        required=True,
+        required=False,
+        default=os.environ.get('OPENAI_EMBEDDING_API_KEY'),
         type=str,
         help="The api key to access the embedding model. Default value reads OPENAI_EMBEDDING_API_KEY env var."
     )   

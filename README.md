@@ -44,6 +44,83 @@ The files are expected to have the following naming:
 
 * case_<case_number>.md
 
+## Quick Start
+
+The fastest way to get started:
+
+~~~sh
+# 1. Install dependencies
+uv sync
+
+# 2. Start ChromaDB (optional - can use embedded mode)
+./scripts/run-chromadb.sh
+
+# 3. Install and run Ollama (in a separate terminal)
+# Download from https://ollama.ai
+ollama pull gemma2:9b
+ollama pull nomic-embed-text:latest
+
+# 4. Ingest your support case files
+uv run python src/cli.py local-ingest \
+  -d ./case_files \
+  -m nomic-embed-text:latest \
+  -em-api http://127.0.0.1:11434/api/embeddings \
+  -ek "not-needed"
+
+# 5. Start the RAG API
+uv run python src/cli.py rag-api \
+  -m gemma2:9b \
+  -em nomic-embed-text:latest \
+  -llm-api http://127.0.0.1:11434/v1 \
+  -em-api http://127.0.0.1:11434/api/embeddings \
+  -lk "not-needed" \
+  -ek "not-needed"
+
+# 6. Start the chatbot (in another terminal)
+uv run python src/cli.py chatbot
+~~~
+
+## Prerequisites
+
+Before running the tool, you need to set up the following services:
+
+### 1. ChromaDB (Vector Database)
+
+ChromaDB is required for storing document embeddings. You can run it using the provided script:
+
+~~~sh
+# Using the provided script:
+./scripts/run-chromadb.sh
+
+# Or manually with Docker/Podman:
+mkdir -p /var/tmp/chroma-data
+podman run -d --rm --name chromadb \
+  -v /var/tmp/chroma-data:/data:rw,z \
+  -p 8000:8000 \
+  docker.io/chromadb/chroma:latest
+~~~
+
+ChromaDB will be available at `http://localhost:8000`.
+
+> **NOTE**: You can also use ChromaDB in embedded mode (default) by not specifying `--db-endpoint` in the CLI commands. This creates a local `./chromadb` directory.
+
+### 2. LLM API Endpoints
+
+You have two options for LLM services:
+
+**Option A: Ollama (Local)**
+- Install Ollama from [ollama.ai](https://ollama.ai)
+- Pull the models you want to use:
+  ~~~sh
+  ollama pull gemma2:9b
+  ollama pull nomic-embed-text:latest
+  ~~~
+- Ollama API will be available at `http://localhost:11434`
+
+**Option B: Google Gemini (Cloud)**
+- Get a free API key from [Google AI Studio](https://aistudio.google.com/apikey)
+- Set it in `.env` file or pass via CLI flag
+
 ## How to run the tool
 
 ### 1. Install requirements
@@ -59,18 +136,20 @@ Ingest support case files from a local directory:
 > **NOTE**: By default, the ingestion will only ingest data not existing in the Vector DB. Use `-i` parameter to initialize the db from scratch.
 
 ~~~sh
-uv run python src/cli.py local-ingest \
-  -d <source_dir> \
-  -m <embeddings_model> \
-  -em-api <embeddings_api_endpoint> \
-  -ek <embedding_api_key>
-
-# Example with Ollama:
+# Using embedded ChromaDB (creates ./chromadb directory):
 uv run python src/cli.py local-ingest \
   -d ./case_files \
   -m nomic-embed-text:latest \
   -em-api http://127.0.0.1:11434/api/embeddings \
   -ek "not-needed"
+
+# Using ChromaDB container (if you started it with the script):
+uv run python src/cli.py local-ingest \
+  -d ./case_files \
+  -m nomic-embed-text:latest \
+  -em-api http://127.0.0.1:11434/api/embeddings \
+  -ek "not-needed" \
+  --db-endpoint http://127.0.0.1:8000
 ~~~
 
 ### 3. Run the RAG API
@@ -78,16 +157,7 @@ uv run python src/cli.py local-ingest \
 Start the RAG API server that handles query processing:
 
 ~~~sh
-uv run python src/cli.py rag-api \
-  -m <llm_model> \
-  -em <embeddings_model> \
-  -llm-api <llm_api_endpoint> \
-  -em-api <embeddings_api_endpoint> \
-  -lk <llm_api_key> \
-  -ek <embedding_api_key> \
-  -p <port>
-
-# Example with Ollama:
+# Example with Ollama and embedded ChromaDB:
 uv run python src/cli.py rag-api \
   -m gemma2:9b \
   -em nomic-embed-text:latest \
@@ -95,6 +165,17 @@ uv run python src/cli.py rag-api \
   -em-api http://127.0.0.1:11434/api/embeddings \
   -lk "not-needed" \
   -ek "not-needed" \
+  -p 8080
+
+# With ChromaDB container:
+uv run python src/cli.py rag-api \
+  -m gemma2:9b \
+  -em nomic-embed-text:latest \
+  -llm-api http://127.0.0.1:11434/v1 \
+  -em-api http://127.0.0.1:11434/api/embeddings \
+  -lk "not-needed" \
+  -ek "not-needed" \
+  --db-endpoint http://127.0.0.1:8000 \
   -p 8080
 ~~~
 
@@ -150,3 +231,47 @@ The agent interface provides a conversational experience that:
 - Gathers required information (product version, error message, etc.)
 - Validates and stores user input
 - Automatically queries the RAG system when all information is collected
+
+### 6. Run the A2A Agent Server (Advanced)
+
+Expose the agent via the Agent-to-Agent (A2A) protocol for programmatic access:
+
+> **NOTE**: Requires RAG API to be running (see step 3)
+
+**What is A2A?**
+The Agent-to-Agent (A2A) protocol allows agents to discover and communicate with each other. This is useful for building multi-agent systems where agents can delegate tasks to specialized agents.
+
+**Starting the A2A Agent Server:**
+
+~~~sh
+# Using Google Gemini (recommended):
+uv run python src/cli.py a2a-agent \
+  -m gemini-2.0-flash \
+  --rag-api-endpoint http://127.0.0.1:8080/answer \
+  -p 8001
+
+# Using Ollama:
+uv run python src/cli.py a2a-agent \
+  -m gemma2:9b \
+  -llm-api http://127.0.0.1:11434/v1 \
+  -lk "not-needed" \
+  --rag-api-endpoint http://127.0.0.1:8080/answer \
+  -p 8001
+~~~
+
+**Accessing the Agent Card:**
+
+Once the server is running, you can view the agent's capabilities at:
+```
+http://localhost:8001/.well-known/agent-card.json
+```
+
+This endpoint exposes auto-generated metadata about the agent, including:
+- Agent name and description
+- Available capabilities (automatically extracted from agent tools)
+- Input/output modes
+- Protocol version information
+
+**Consuming the A2A Agent:**
+
+Other agents or applications can discover and interact with this agent programmatically using the A2A protocol. The agent card provides all the information needed for automatic integration.

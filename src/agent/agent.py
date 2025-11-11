@@ -4,21 +4,33 @@ from gradio import ChatMessage
 import aiohttp
 import ssl
 from google.adk.agents import Agent
+from google.adk.a2a.utils.agent_to_a2a import to_a2a
+from google.adk.runners import Runner
+from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
+from google.adk.sessions.in_memory_session_service import InMemorySessionService
+from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
+from google.adk.auth.credential_service.in_memory_credential_service import InMemoryCredentialService
+from google.genai import types
 import httpx
 import os
+import uuid
 from typing import List
 from dotenv import load_dotenv
+import uvicorn
 
 # Load environment variables from .env file if it exists
 load_dotenv()
 
 
-class GradioAgent():
-    def __init__(self, agent_port, rag_api_endpoint, llm_api_endpoint, model_api_key, model, context_window_length, skip_tls):
-        self.logger = Logger("gradio-agent", "INFO").new_logger()
-        self.agent_port = agent_port
+class SupportTicketAgent():
+    """Base agent class that handles support ticket assistance logic."""
+
+    def __init__(self, rag_api_endpoint, llm_api_endpoint, model_api_key, model, context_window_length=10000, skip_tls=False):
+        self.logger = Logger("support-ticket-agent", "INFO").new_logger()
+
         if not url_is_valid(rag_api_endpoint):
             raise InvalidAPIEndpointError("Invalid RAG API endpoint URL")
+
         self.rag_api_endpoint = rag_api_endpoint
         self.llm_api_endpoint = llm_api_endpoint
         self.model_api_key = model_api_key
@@ -30,8 +42,6 @@ class GradioAgent():
         self.only_high_similarity_nodes = False
 
         # Configure API keys based on the endpoint being used
-        # If using custom endpoint (Ollama), use OPENAI_API_KEY and OPENAI_API_BASE
-        # If using Gemini, use GEMINI_API_KEY
         if llm_api_endpoint and "ollama" in llm_api_endpoint.lower() or llm_api_endpoint and llm_api_endpoint != "https://generativelanguage.googleapis.com":
             # Using Ollama or other OpenAI-compatible endpoint
             os.environ["OPENAI_API_KEY"] = self.model_api_key
@@ -71,70 +81,27 @@ Remember to be conversational and helpful throughout the interaction."""
             tools=[self.search_support_tickets, self.update_ticket_state]
         )
 
-        # Initialize conversation history for Gradio
-        self.conversation_history = []
+        # Create services
+        self.session_service = InMemorySessionService()
 
-    async def respond(self, message: str, history: List[List[str]]) -> tuple[List[List[str]], str]:
-        """
-        Handle user messages and generate responses using the agent.
+        # Create runner for invoking the agent
+        self.runner = Runner(
+            app_name="support_ticket_assistant",  # Match the agent name
+            agent=self.agent,
+            artifact_service=InMemoryArtifactService(),
+            session_service=self.session_service,
+            memory_service=InMemoryMemoryService(),
+            credential_service=InMemoryCredentialService(),
+        )
 
-        Args:
-            message (str): The user's message
-            history (List[List[str]]): The chat history in Gradio format
-
-        Returns:
-            tuple: Updated history and empty string (for new message)
-        """
-        try:
-            # Get response from ADK agent
-            response = await self.agent.run_async(message)
-
-            # Extract the response text
-            response_text = str(response)
-
-            # Return the updated history (Gradio will handle the display)
-            return history + [[message, response_text]], ""
-
-        except Exception as e:
-            error_message = f"An error occurred: {e}"
-            self.logger.error(error_message)
-            print(error_message)
-            return history + [[message, error_message]], ""
-
-    async def get_agent_response(self, message: str) -> str:
-        """
-        Get response from agent.
-
-        Args:
-            message (str): The user's message
-
-        Returns:
-            str: The agent's response
-        """
-        try:
-            # Get response from ADK agent
-            response = await self.agent.run_async(message)
-
-            return str(response)
-
-        except Exception as e:
-            error_message = f"An error occurred: {e}"
-            self.logger.error(error_message)
-            print(error_message)
-            return error_message
-    
-    def clear_chat(self):
-        """Clear the chat history and reset the state."""
-        self.ticket_state.clear()
-        self.conversation_history = []
-        return [], "", "No information gathered yet"
+        self.logger.info(f"Support ticket agent created successfully")
 
     def update_ticket_state(self, field: str, value: str) -> str:
         """
         Update the ticket query state with information provided by the user.
 
         Args:
-            field (str): The field to update (product_version, error_message, or environment)
+            field (str): The field to update (product_version, error_message, or user_description)
             value (str): The value provided by the user
 
         Returns:
@@ -144,8 +111,8 @@ Remember to be conversational and helpful throughout the interaction."""
             return f"Invalid field: {field}. Valid fields are: product_version, error_message, user_description"
 
         self.ticket_state[field] = value
-        print(f"Updated {field}: {value}")
-        print("Current state:", self.ticket_state)
+        self.logger.info(f"Updated {field}: {value}")
+        self.logger.info(f"Current state: {self.ticket_state}")
         return f"Updated {field} to: {value}"
 
     async def search_support_tickets(self, query: str) -> str:
@@ -163,8 +130,8 @@ Remember to be conversational and helpful throughout the interaction."""
             str: A message to the user, either asking for more information or
                  confirming that the search is being performed.
         """
-        print("TICKET INFO: ")
-        print(self.ticket_state)
+        self.logger.info(f"TICKET INFO: {self.ticket_state}")
+
         # Check for missing information in our state
         if not self.ticket_state.get("product_version"):
             return "I can help with that. What is the product version you are using?"
@@ -172,18 +139,163 @@ Remember to be conversational and helpful throughout the interaction."""
             return "Thanks. What is the exact error message you are seeing?"
 
         # If we have all the information, we can now "call" our API
-        print(f"✅ All information gathered: {self.ticket_state}")
-        print("🚀 Querying the support ticket API...")
+        self.logger.info(f"All information gathered: {self.ticket_state}")
+        self.logger.info("Querying the support ticket API...")
 
-        query =  f"Original User query: {self.ticket_state.get('user_description')}\n Error Message: {self.ticket_state.get('error_message')}\n Product Version: {self.ticket_state.get('product_version')}"
+        query = f"Original User query: {self.ticket_state.get('user_description')}\n Error Message: {self.ticket_state.get('error_message')}\n Product Version: {self.ticket_state.get('product_version')}"
         response = await self.answer_query(query, self.num_sources, self.only_high_similarity_nodes)
-        # Simulate an API call with the gathered information
-        # In a real application, you would replace this with your actual API call.
 
         # Clear the state for the next interaction
         self.ticket_state.clear()
 
         return response
+
+    async def answer_query(self, user_query, num_sources, only_high_similarity_nodes):
+        """Query the RAG API endpoint."""
+        # Create the query parameters
+        query_params = {
+            "user_query": user_query,
+            "num_sources": num_sources,
+            "only_high_similarity_nodes": only_high_similarity_nodes
+        }
+
+        # Make API call to the RAG API endpoint
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Use the RAG API endpoint
+                api_url = self.rag_api_endpoint
+
+                # Configure SSL context if skip_tls is True
+                if self.skip_tls:
+                    ssl_context = ssl.create_default_context()
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_NONE
+                    connector = aiohttp.TCPConnector(ssl=ssl_context)
+                    session = aiohttp.ClientSession(connector=connector)
+
+                async with session.post(api_url, json=query_params) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        return result.get("response", "No response received from API")
+                    else:
+                        error_text = await response.text()
+                        self.logger.error(f"API call failed with status {response.status}: {error_text}")
+                        return f"Error: API call failed with status {response.status}"
+
+        except Exception as e:
+            self.logger.error(f"Failed to call RAG API: {e}")
+            return f"Error: Failed to call RAG API - {str(e)}"
+
+
+class GradioAgent():
+    """Gradio web UI wrapper for the support ticket agent."""
+
+    def __init__(self, agent_port, rag_api_endpoint, llm_api_endpoint, model_api_key, model, context_window_length, skip_tls):
+        self.logger = Logger("gradio-agent-ui", "INFO").new_logger()
+        self.agent_port = agent_port
+
+        # Create the underlying support ticket agent
+        self.support_agent = SupportTicketAgent(
+            rag_api_endpoint=rag_api_endpoint,
+            llm_api_endpoint=llm_api_endpoint,
+            model_api_key=model_api_key,
+            model=model,
+            context_window_length=context_window_length,
+            skip_tls=skip_tls
+        )
+
+        # Create session tracking for conversations
+        self.user_id = "gradio_user"
+        self.session_id = str(uuid.uuid4())
+
+    async def respond(self, message: str, history: List[List[str]]) -> tuple[List[List[str]], str]:
+        """
+        Handle user messages and generate responses using the agent.
+
+        Args:
+            message (str): The user's message
+            history (List[List[str]]): The chat history in Gradio format
+
+        Returns:
+            tuple: Updated history and empty string (for new message)
+        """
+        try:
+            # Get response using get_agent_response
+            response_text = await self.get_agent_response(message)
+
+            # Return the updated history (Gradio will handle the display)
+            return history + [[message, response_text]], ""
+
+        except Exception as e:
+            error_message = f"An error occurred: {e}"
+            self.logger.error(error_message)
+            print(error_message)
+            import traceback
+            traceback.print_exc()
+            return history + [[message, error_message]], ""
+
+    async def get_agent_response(self, message: str) -> str:
+        """
+        Get response from agent.
+
+        Args:
+            message (str): The user's message
+
+        Returns:
+            str: The agent's response
+        """
+        try:
+            # Ensure session exists
+            app_name = "support_ticket_assistant"
+            existing_session = await self.support_agent.session_service.get_session(
+                app_name=app_name,
+                user_id=self.user_id,
+                session_id=self.session_id
+            )
+
+            if existing_session is None:
+                # Session doesn't exist, create it
+                await self.support_agent.session_service.create_session(
+                    app_name=app_name,
+                    user_id=self.user_id,
+                    session_id=self.session_id
+                )
+
+            # Create message content
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part(text=message)]
+            )
+
+            # Get response from ADK agent using Runner
+            response_text = ""
+            async for event in self.support_agent.runner.run_async(
+                user_id=self.user_id,
+                session_id=self.session_id,
+                new_message=new_message
+            ):
+                # Extract text from agent response events
+                if hasattr(event, 'content') and event.content:
+                    for part in event.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            response_text += part.text
+
+            return response_text
+
+        except Exception as e:
+            error_message = f"An error occurred: {e}"
+            self.logger.error(error_message)
+            print(error_message)
+            import traceback
+            traceback.print_exc()
+            return error_message
+
+    def clear_chat(self):
+        """Clear the chat history and reset the state."""
+        self.support_agent.ticket_state.clear()
+        # Create a new session for the new conversation
+        self.session_id = str(uuid.uuid4())
+        return [], "", "No information gathered yet"
 
     def run(self):
         
@@ -230,9 +342,9 @@ Remember to be conversational and helpful throughout the interaction."""
                 if not chat_history:
                     return chat_history
                 last_user_message = chat_history[-1]['content']
-                # Add extra params below, need to update the other function
-                self.num_sources = num_sources
-                self.only_high_similarity_nodes = only_high_similarity_nodes
+                # Update agent settings from UI
+                self.support_agent.num_sources = num_sources
+                self.support_agent.only_high_similarity_nodes = only_high_similarity_nodes
                 response = await self.get_agent_response(last_user_message)
                 chat_history.append(ChatMessage(role="assistant", content=response))
                 return chat_history
@@ -251,41 +363,45 @@ Remember to be conversational and helpful throughout the interaction."""
             webui.launch(server_port=self.agent_port, server_name="0.0.0.0")
         except:
              raise FailedToRunChatBotWebUI("Agent WebUI failed to start")
-            
-    async def answer_query(self, user_query, num_sources, only_high_similarity_nodes):
-        # Create the query parameters
-        query_params = {
-            "user_query": user_query,
-            "num_sources": num_sources,
-            "only_high_similarity_nodes": only_high_similarity_nodes
-        }
-        
-        # Make API call to the RAG API endpoint
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Use the RAG API endpoint
-                api_url = self.rag_api_endpoint
-                
-                # Configure SSL context if skip_tls is True
-                if self.skip_tls:
-                    ssl_context = ssl.create_default_context()
-                    ssl_context.check_hostname = False
-                    ssl_context.verify_mode = ssl.CERT_NONE
-                    connector = aiohttp.TCPConnector(ssl=ssl_context)
-                    session = aiohttp.ClientSession(connector=connector)
-                
-                async with session.post(api_url, json=query_params) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        return result.get("response", "No response received from API")
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(f"API call failed with status {response.status}: {error_text}")
-                        return f"Error: API call failed with status {response.status}"
-                        
-        except Exception as e:
-            self.logger.error(f"Failed to call RAG API: {e}")
-            return f"Error: Failed to call RAG API - {str(e)}"
-       
-    
-   
+
+
+def create_a2a_app(rag_api_endpoint, llm_api_endpoint, model_api_key, model, port=8001, skip_tls=False):
+    """
+    Create an A2A-exposed FastAPI application for the support ticket agent.
+
+    Args:
+        rag_api_endpoint: The RAG API endpoint URL
+        llm_api_endpoint: The LLM API endpoint URL
+        model_api_key: API key for the LLM
+        model: The model name to use
+        port: Port number for the A2A server
+        skip_tls: Whether to skip TLS verification
+
+    Returns:
+        FastAPI application configured for A2A protocol
+    """
+    logger = Logger("a2a-app-factory", "INFO").new_logger()
+
+    # Create the agent
+    agent_server = SupportTicketAgent(
+        rag_api_endpoint=rag_api_endpoint,
+        llm_api_endpoint=llm_api_endpoint,
+        model_api_key=model_api_key,
+        model=model,
+        skip_tls=skip_tls
+    )
+
+    # Let ADK auto-generate the agent card from the agent's metadata
+    # The agent card will be automatically built from:
+    # - Agent name and description
+    # - Tools (which become capabilities)
+    # - Agent instruction (becomes part of description)
+    logger.info(f"Creating A2A app with auto-generated agent card for agent: {agent_server.agent.name}")
+
+    # Expose the agent via A2A protocol
+    # The agent card will be automatically generated
+    a2a_app = to_a2a(agent_server.agent, port=port)
+
+    logger.info(f"A2A app created successfully. Agent card available at: http://localhost:{port}/.well-known/agent-card.json")
+
+    return a2a_app
