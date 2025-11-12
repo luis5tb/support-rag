@@ -272,6 +272,21 @@ This endpoint exposes auto-generated metadata about the agent, including:
 - Input/output modes
 - Protocol version information
 
-**Consuming the A2A Agent:**
+**Testing the A2A Agent:**
+
+**Using the Test Script:**
+
+Run the included test script to quickly verify your A2A agent is working:
+
+~~~sh
+uv run python test_a2a_agent.py
+~~~
+
+This script will:
+- Connect to the A2A agent at `http://localhost:8001`
+- Fetch and display the agent card
+- Send a test conversation to verify the agent's functionality
+
+**Programmatic Integration:**
 
 Other agents or applications can discover and interact with this agent programmatically using the A2A protocol. The agent card provides all the information needed for automatic integration.
